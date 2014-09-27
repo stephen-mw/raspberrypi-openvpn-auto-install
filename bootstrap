@@ -1,0 +1,141 @@
+#!/bin/bash
+set -e
+
+# The first argument must be a fully qualified domain name, which we'll use to
+# also derive the client
+OPENVPN_FQDN="$1"
+OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
+OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
+
+if [[ "${OPENVPN_USER}" == "" || ${OPENVPN_DOMAIN} == "" ]]; then
+cat <<HELP
+First arg must be a fully qualified domain name.
+
+E.g stephen.openvpn.local
+
+The 'openvpn.local' is your domain, and the 'stephen' will be your user.
+
+HELP
+  exit
+fi
+
+# The RPI has a hardware RNG, but it's not turned on by default. We'll be
+# generating a lot of random data here so we'll enable it
+#modprobe bcm2708-rng
+#echo "bcm2708-rng" >> /etc/modules
+
+apt-get update
+apt-get install -y openvpn
+
+WORK_DIR='/etc/openvpn'
+mkdir -p ${WORK_DIR}
+pushd ${WORK_DIR}
+
+# Copy over our configs
+mkdir easy-rsa
+cp -r -- /usr/share/doc/openvpn/examples/easy-rsa/2.0/* /etc/openvpn/easy-rsa/
+pushd easy-rsa/
+
+# Source the vars and then overwrite the values we care about
+cat >> ./vars <<VARS
+export KEY_SIZE=2048
+export KEY_CN="${OPENVPN_DOMAIN}"
+export KEY_NAME="${OPENVPN_DOMAIN}"
+export KEY_OU="${OPENVPN_DOMAIN}"
+VARS
+source vars
+
+# Generate the server's configuration
+./clean-all
+./pkitool --initca
+./pkitool --server ${OPENVPN_DOMAIN}
+./build-dh
+
+# Copy over the server's keys
+cp -- keys/${OPENVPN_DOMAIN}.* ../
+cp -- keys/ca.* ../
+cp keys/dh2048.pem ../
+
+# Generate a single user's key
+mkdir /root/client_${OPENVPN_USER}
+KEY_CN=${OPENVPN_FQDN}
+./pkitool ${OPENVPN_USER}
+cp keys/stephen.crt /root/client_${OPENVPN_USER}/
+cp keys/stephen.key /root/client_${OPENVPN_USER}/
+cp keys/ca.crt /root/client_${OPENVPN_USER}/
+
+# Create the server config
+popd
+gunzip < /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > server.conf
+# Replacements to use our newly generated keys
+sed -i "s/server.crt/${OPENVPN_DOMAIN}.crt/g" server.conf
+sed -i "s/server.key/${OPENVPN_DOMAIN}.key/g" server.conf
+sed -i 's/dh1024.pem/dh2048.pem/g' server.conf
+
+# Create the client config
+pushd /root/client_${OPENVPN_USER}
+cat > client.conf <<CLIENT
+# This configuration was generated automatically
+client
+
+dev tun
+proto udp
+
+# By default the public IP address is used here
+remote $(curl -s eth0.me) 1194
+
+keepalive 10 120
+
+resolv-retry infinite
+nobind
+
+persist-key
+persist-tun
+
+# auth-user-pass
+
+comp-lzo
+reneg-sec 0
+verb 5
+
+cipher AES-128-CBC
+
+<ca>
+$(cat ca.crt)
+</ca>
+<cert>
+$(tail -n 31 ${OPENVPN_USER}.crt)
+</cert>
+<key>
+$(cat ${OPENVPN_USER}.key)
+</key>
+CLIENT
+chmod 600 client.conf
+
+# Remove the old keys and just save the client configuration
+mv client.conf ../client_${OPENVPN_USER}.ovpn
+rm -rf client_${OPENVPN_USER}
+
+# Start the service
+/etc/init.d/openvpn start
+
+cat <<DONE
+OpenVPN is started and ready to go!
+
+The client configuration was generated for you locally and can be found at:
+
+  /root/client_${OPENVPN_USER}.ovpn
+
+By default the configuration file uses your public IP as an entry-point. That ip
+address is currently:
+
+  $(curl -s eth0.me)
+
+Make sure that your firewall allows incoming UDP connections to port 1194.
+
+The last thing necessary is to securely copy the configuration file over to your
+computer and then load it. The configuration file is located at:
+
+  /root/client_${OPENVPN_USER}.ovpn
+
+DONE
