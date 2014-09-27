@@ -12,5 +12,5 @@ Vagrant.configure("2") do |config|
   # Forward local port 8080 to guest port 80
   config.vm.network "forwarded_port", guest: 1194, host: 1194, protocol: 'udp'
 
-  config.vm.hostname = "openvpn.local"
+  config.vm.hostname = "test.openvpn.local"
 end

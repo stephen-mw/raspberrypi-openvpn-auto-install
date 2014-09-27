@@ -7,6 +7,13 @@ OPENVPN_FQDN="$1"
 OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
 OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
 
+# If we're running vagrant, setup a dummy user and domain
+if [[ -d '/vagrant' ]]; then
+  OPENVPN_FQDN="$(hostname -f)"
+  OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
+  OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
+fi
+
 if [[ "${OPENVPN_USER}" == "" || ${OPENVPN_DOMAIN} == "" ]]; then
 cat <<HELP
 First arg must be a fully qualified domain name.
@@ -60,8 +67,8 @@ cp keys/dh2048.pem ../
 mkdir /root/client_${OPENVPN_USER}
 KEY_CN=${OPENVPN_FQDN}
 ./pkitool ${OPENVPN_USER}
-cp keys/stephen.crt /root/client_${OPENVPN_USER}/
-cp keys/stephen.key /root/client_${OPENVPN_USER}/
+cp keys/${OPENVPN_USER}.crt /root/client_${OPENVPN_USER}/
+cp keys/${OPENVPN_USER}.key /root/client_${OPENVPN_USER}/
 cp keys/ca.crt /root/client_${OPENVPN_USER}/
 
 # Create the server config
