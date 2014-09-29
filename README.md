@@ -20,7 +20,11 @@ The auto-installer is completely automated and can be run directly from the web.
 
 From your raspberry pi:
 ```bash
-$ curl "https://raw.githubusercontent.com/stephen-mw/raspberrypi-openvpn-autoinstall/master/bootstrap" | sudo sh - -- stephen.example.local
+# Set the user
+$ OPENVPN_USER='stephen.openvpn.local'
+
+# Run the installer
+$ curl "https://raw.githubusercontent.com/stephen-mw/raspberrypi-openvpn-autoinstall/master/bootstrap" | sudo bash
 ```
 
 Remember that you should always inspect these types of files before ever running them. You can download it locally and run it like so:
@@ -33,7 +37,7 @@ $ less bootstrap
 
 # Execute it
 $ chmod +x bootstrap
-$ sudo ./bootstrap
+$ sudo ./bootstrap stephen.openvpn.local
 ```
 
 ## What's the installer do

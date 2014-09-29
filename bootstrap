@@ -1,11 +1,14 @@
 #!/bin/bash
 set -e
 
-# The first argument must be a fully qualified domain name, which we'll use to
-# also derive the client
-OPENVPN_FQDN="$1"
-OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
-OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
+# You can set either the environment variable or an argument to create the
+# openvpn user. If you're running this from curl you'll need to set the
+# environment variable first
+if [[ "${OPENVPN_FQDN}" == "" ]]; then
+  OPENVPN_FQDN="$1"
+  OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
+  OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
+fi
 
 # If we're running vagrant, setup a dummy user and domain
 if [[ -d '/vagrant' ]]; then
@@ -14,7 +17,7 @@ if [[ -d '/vagrant' ]]; then
   OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
 fi
 
-if [[ "${OPENVPN_USER}" == "" || ${OPENVPN_DOMAIN} == "" ]]; then
+if [[ "${OPENVPN_USER}" == "" || "${OPENVPN_DOMAIN}" == "" ]]; then
 cat <<HELP
 First arg must be a fully qualified domain name.
 
