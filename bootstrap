@@ -1,21 +1,10 @@
 #!/bin/bash
+set -x
 set -e
 
-# You can set either the environment variable or an argument to create the
-# openvpn user. If you're running this from curl you'll need to set the
-# environment variable first
-if [[ "${OPENVPN_FQDN}" == "" ]]; then
-  OPENVPN_FQDN="$1"
-  OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
-  OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
-fi
-
-# If we're running vagrant, setup a dummy user and domain
-if [[ -d '/vagrant' ]]; then
-  OPENVPN_FQDN="$(hostname -f)"
-  OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
-  OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
-fi
+OPENVPN_FQDN="$1"
+OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
+OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
 
 if [[ "${OPENVPN_USER}" == "" || "${OPENVPN_DOMAIN}" == "" ]]; then
 cat <<HELP
@@ -29,26 +18,39 @@ HELP
   exit
 fi
 
-# The RPI has a hardware RNG, but it's not turned on by default. We'll be
-# generating a lot of random data here so we'll enable it
-#modprobe bcm2708-rng
-#echo "bcm2708-rng" >> /etc/modules
+# This script works on either debian or redhat systems. We'll use this variable
+# to differentiate between the two OSs during the install
+if [[ -f '/etc/redhat-release' ]]; then
+  REDHAT=TRUE
+fi
 
-apt-get update
-apt-get install -y openvpn
+PACKAGES="git openvpn"
+
+if [[ -n "${REDHAT}" ]]; then
+  rpm -ivh http://dl.fedoraproject.org/pub/epel/6/i386/epel-release-6-8.noarch.rpm || true
+  yum install -y ${PACKAGES}
+else
+  apt-get update
+  apt-get install -y ${PACKAGES}
+fi
+
+test -d /etc/openvpn && rm -r /etc/openvpn
+test -d /tmp/easy-rsa && rm -rf /tmp/easy-rsa
+mkdir -p /etc/openvpn
+rm -rf /tmp/easy-rsa
 
 WORK_DIR='/etc/openvpn'
 mkdir -p ${WORK_DIR}
 pushd ${WORK_DIR}
 
 # Copy over our configs
-mkdir easy-rsa
-cp -r -- /usr/share/doc/openvpn/examples/easy-rsa/2.0/* /etc/openvpn/easy-rsa/
+git clone https://github.com/OpenVPN/easy-rsa.git -b release/2.x  /tmp/easy-rsa
+cp -r /tmp/easy-rsa/easy-rsa/2.0 /etc/openvpn/easy-rsa
 pushd easy-rsa/
 
 # Source the vars and then overwrite the values we care about
 cat >> ./vars <<VARS
-export KEY_SIZE=2048
+export KEY_SIZE=1024
 export KEY_CN="${OPENVPN_DOMAIN}"
 export KEY_NAME="${OPENVPN_DOMAIN}"
 export KEY_OU="${OPENVPN_DOMAIN}"
@@ -64,10 +66,11 @@ source vars
 # Copy over the server's keys
 cp -- keys/${OPENVPN_DOMAIN}.* ../
 cp -- keys/ca.* ../
-cp keys/dh2048.pem ../
+cp keys/dh1024.pem ../
 
 # Generate a single user's key
-mkdir /root/client_${OPENVPN_USER}
+test -d /root/client_${OPENVPN_USER} && rm -rf /root/client_${OPENVPN_USER}
+mkdir -p /root/client_${OPENVPN_USER}
 KEY_CN=${OPENVPN_FQDN}
 ./pkitool ${OPENVPN_USER}
 cp keys/${OPENVPN_USER}.crt /root/client_${OPENVPN_USER}/
@@ -76,11 +79,23 @@ cp keys/ca.crt /root/client_${OPENVPN_USER}/
 
 # Create the server config
 popd
-gunzip < /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > server.conf
+if [[ -n "${REDHAT}" ]]; then
+  cp /usr/share/doc/openvpn-2.3.6/sample/sample-config-files/server.conf .
+else
+  zcat /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > server.conf
+fi
+
 # Replacements to use our newly generated keys
 sed -i "s/server.crt/${OPENVPN_DOMAIN}.crt/g" server.conf
 sed -i "s/server.key/${OPENVPN_DOMAIN}.key/g" server.conf
-sed -i 's/dh1024.pem/dh2048.pem/g' server.conf
+sed -i 's/;cipher AES-128-CBC/cipher AES-128-CBC/g' server.conf
+
+# Users will be required to login via their server username/password
+if [[ -n "${REDHAT}" ]]; then
+  echo 'plugin /usr/lib64/openvpn/plugins/openvpn-plugin-auth-pam.so login' >> server.conf
+else
+  echo 'plugin /usr/lib/openvpn/openvpn-auth-pam.so login' >> server.conf
+fi
 
 # Create the client config
 pushd /root/client_${OPENVPN_USER}
@@ -91,8 +106,16 @@ client
 dev tun
 proto udp
 
+# Don't cache passwords in memory
+auth-nocache
+
 # By default the public IP address is used here
 remote $(curl -s eth0.me) 1194
+
+# We'll push all of our traffic through this host
+redirect-gateway def1 bypass-dhcp
+
+dhcp-option DNS 8.8.8.8
 
 keepalive 10 120
 
@@ -102,7 +125,8 @@ nobind
 persist-key
 persist-tun
 
-# auth-user-pass
+# Require the user to enter their linux username/password
+auth-user-pass
 
 comp-lzo
 reneg-sec 0
@@ -114,7 +138,7 @@ cipher AES-128-CBC
 $(cat ca.crt)
 </ca>
 <cert>
-$(tail -n 31 ${OPENVPN_USER}.crt)
+$(tail -n 26 ${OPENVPN_USER}.crt)
 </cert>
 <key>
 $(cat ${OPENVPN_USER}.key)
@@ -128,6 +152,26 @@ rm -rf client_${OPENVPN_USER}
 
 # Start the service
 /etc/init.d/openvpn start
+
+# Enable ip forwarding
+sed -ie 's/.*net.ipv4.ip_forward.*/net.ipv4.ip_forward = 1/' /etc/sysctl.conf
+sysctl -p
+
+# Clear iptables rules and then add our own
+iptables -t nat -F
+iptables -t nat -I POSTROUTING -s 10.8.0.0/24 -d 0.0.0.0/0 -o eth0 -j MASQUERADE
+
+if [[ -n "${REDHAT}" ]]; then
+  /sbin/service iptables save
+else
+  # Make sure iptables rules stick after reboot
+  iptables-save > /etc/iptables_openvpn
+  cat > /etc/network/if-pre-up.d/iptables <<IPTABLES
+#!/bin/sh
+/sbin/iptables-restore < /etc/iptables_openvpn
+IPTABLES
+  chmod +x /etc/network/if-pre-up.d/iptables
+fi
 
 cat <<DONE
 OpenVPN is started and ready to go!
