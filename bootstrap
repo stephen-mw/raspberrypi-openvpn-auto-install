@@ -6,6 +6,9 @@ OPENVPN_FQDN="$1"
 OPENVPN_USER=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $1}')
 OPENVPN_DOMAIN=$(echo ${OPENVPN_FQDN} | awk -F'.' '{print $2 "." $3}')
 
+# For travis support
+TRAVIS=$2
+
 if [[ "${OPENVPN_USER}" == "" || "${OPENVPN_DOMAIN}" == "" ]]; then
 cat <<HELP
 First arg must be a fully qualified domain name.
@@ -18,21 +21,8 @@ HELP
   exit
 fi
 
-# This script works on either debian or redhat systems. We'll use this variable
-# to differentiate between the two OSs during the install
-if [[ -f '/etc/redhat-release' ]]; then
-  REDHAT=TRUE
-fi
-
-PACKAGES="git openvpn"
-
-if [[ -n "${REDHAT}" ]]; then
-  rpm -ivh http://dl.fedoraproject.org/pub/epel/6/i386/epel-release-6-8.noarch.rpm || true
-  yum install -y ${PACKAGES}
-else
-  apt-get update
-  apt-get install -y ${PACKAGES}
-fi
+apt-get update
+apt-get install -y git openvpn
 
 test -d /etc/openvpn && rm -r /etc/openvpn
 test -d /tmp/easy-rsa && rm -rf /tmp/easy-rsa
@@ -50,7 +40,7 @@ pushd easy-rsa/
 
 # Source the vars and then overwrite the values we care about
 cat >> ./vars <<VARS
-export KEY_SIZE=1024
+export KEY_SIZE=${KEY_SIZE:-4096}
 export KEY_CN="${OPENVPN_DOMAIN}"
 export KEY_NAME="${OPENVPN_DOMAIN}"
 export KEY_OU="${OPENVPN_DOMAIN}"
@@ -66,36 +56,55 @@ source vars
 # Copy over the server's keys
 cp -- keys/${OPENVPN_DOMAIN}.* ../
 cp -- keys/ca.* ../
-cp keys/dh1024.pem ../
+cp keys/dh${KEY_SIZE}.pem ../
 
 # Generate a single user's key
 test -d /root/client_${OPENVPN_USER} && rm -rf /root/client_${OPENVPN_USER}
 mkdir -p /root/client_${OPENVPN_USER}
 KEY_CN=${OPENVPN_FQDN}
+
 ./pkitool ${OPENVPN_USER}
 cp keys/${OPENVPN_USER}.crt /root/client_${OPENVPN_USER}/
 cp keys/${OPENVPN_USER}.key /root/client_${OPENVPN_USER}/
 cp keys/ca.crt /root/client_${OPENVPN_USER}/
 
 # Create the server config
-popd
-if [[ -n "${REDHAT}" ]]; then
-  cp /usr/share/doc/openvpn-2.3.6/sample/sample-config-files/server.conf .
-else
-  zcat /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz > server.conf
-fi
+cat > server.conf <<SERVER_CONF
+# Base configuration for openvpn on a raspberry pi. For a full list of features
+# and options consul the openvpn website.
 
-# Replacements to use our newly generated keys
-sed -i "s/server.crt/${OPENVPN_DOMAIN}.crt/g" server.conf
-sed -i "s/server.key/${OPENVPN_DOMAIN}.key/g" server.conf
-sed -i 's/;cipher AES-128-CBC/cipher AES-128-CBC/g' server.conf
+port 1194
+proto udp
+dev tun
 
-# Users will be required to login via their server username/password
-if [[ -n "${REDHAT}" ]]; then
-  echo 'plugin /usr/lib64/openvpn/plugins/openvpn-plugin-auth-pam.so login' >> server.conf
-else
-  echo 'plugin /usr/lib/openvpn/openvpn-auth-pam.so login' >> server.conf
-fi
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist ipp.txt
+
+# Push all traffic through this tunnel
+push "redirect-gateway def1 bypass-dhcp"
+
+ca ca.crt
+cert ${OPENVPN_DOMAIN}.crt
+dh dh${KEY_SIZE}.pem
+
+# Keep this a secret
+key ${OPENVPN_DOMAIN}.key
+
+keepalive 60 300
+
+cipher AES-128-CBC   # AES
+
+comp-lzo
+
+user nobody
+group nogroup
+
+persist-key
+persist-tun
+
+status openvpn-status.log
+plugin /usr/lib/openvpn/openvpn-auth-pam.so login
+SERVER_CONF
 
 # Create the client config
 pushd /root/client_${OPENVPN_USER}
@@ -138,7 +147,7 @@ cipher AES-128-CBC
 $(cat ca.crt)
 </ca>
 <cert>
-$(tail -n 26 ${OPENVPN_USER}.crt)
+$(tail -n 42 ${OPENVPN_USER}.crt)
 </cert>
 <key>
 $(cat ${OPENVPN_USER}.key)
@@ -154,16 +163,17 @@ rm -rf client_${OPENVPN_USER}
 /etc/init.d/openvpn start
 
 # Enable ip forwarding
-sed -ie 's/.*net.ipv4.ip_forward.*/net.ipv4.ip_forward = 1/' /etc/sysctl.conf
-sysctl -p
 
-# Clear iptables rules and then add our own
-iptables -t nat -F
-iptables -t nat -I POSTROUTING -s 10.8.0.0/24 -d 0.0.0.0/0 -o eth0 -j MASQUERADE
+# These settings break inside a container (such as Travis build), so we will
+# ignore them if doing CI tests
+if [[ -z "${TRAVIS}" ]]; then
+  echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/ip_forward.conf
+  sysctl -p
 
-if [[ -n "${REDHAT}" ]]; then
-  /sbin/service iptables save
-else
+  # Clear iptables rules and then add our own
+  iptables -t nat -F
+  iptables -t nat -I POSTROUTING -s 10.8.0.0/24 -d 0.0.0.0/0 -o eth0 -j MASQUERADE
+
   # Make sure iptables rules stick after reboot
   iptables-save > /etc/iptables_openvpn
   cat > /etc/network/if-pre-up.d/iptables <<IPTABLES

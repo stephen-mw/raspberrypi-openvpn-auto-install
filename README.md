@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/stephen-mw/raspberrypi-openvpn-auto-install.svg?branch=master)](https://travis-ci.org/stephen-mw/raspberrypi-openvpn-auto-install)
+
 ## Openvpn server on your Raspberry PI
 
 From wikipedia:

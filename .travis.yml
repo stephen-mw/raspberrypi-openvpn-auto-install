@@ -1,0 +1,1 @@
+script: sudo sh -c 'export KEY_SIZE=1024; ./bootstrap travis.test.local True'
